@@ -378,7 +378,7 @@ export default function KoboFiller() {
   const [schemaLoading, setSchemaLoading] = useState(false)
   const [schemaError, setSchemaError]     = useState("")
 
-  const [provider, setProvider]       = useState("groq")
+  const [selectedModel, setSelectedModel]       = useState("google/gemini-2.5-flash")
   const [config, setConfig]           = useState({ distribution:"realistic", entries:10, country:"Nigeria" })
   const [enumerators, setEnumerators] = useState(3)
   const [days, setDays]               = useState(3)
@@ -438,7 +438,7 @@ export default function KoboFiller() {
 
         const res = await fetch("/api/generate", {
           method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({ config, fields, batchSize, previousContext }),
+          body: JSON.stringify({ config, fields, batchSize, previousContext, model: selectedModel }),
         })
         const text = await res.text()
         let data
@@ -635,9 +635,10 @@ export default function KoboFiller() {
               <CardHeader title="Generation Settings" subtitle="Configure AI provider, distribution, and collection parameters"/>
               <div style={{ padding:"16px 20px", display:"flex", flexDirection:"column", gap:14 }}>
                 <div className="g3" style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
-                  <Select label="AI Provider" value={provider} onChange={e=>setProvider(e.target.value)}>
-                    <option value="groq">Groq — Llama 3.3 (Fast)</option>
-                    <option value="anthropic">Anthropic — Claude Haiku</option>
+                  <Select label="AI Provider" value={selectedModel} onChange={e=>setSelectedModel(e.target.value)}>
+                    <option value="google/gemini-2.5-flash">Google — Gemini 2.5 Flash (Default)</option>
+                    <option value="meta-llama/llama-3.3-70b-instruct">Meta — Llama 3.3 70B Instruct</option>
+                    <option value="openai/gpt-4o-mini">OpenAI — GPT-4o Mini</option>
                   </Select>
                   <Select label="Distribution" value={config.distribution} onChange={e=>setConfig(c=>({...c,distribution:e.target.value}))}>
                     <option value="realistic">Realistic</option>
@@ -673,7 +674,14 @@ export default function KoboFiller() {
                     </Btn>
                   )}
                 </div>
-                {collectionFull && <Alert type="info">Collection is full at {MAX_COLLECTION} rows. Go to the Collection tab to edit, export, or clear it.</Alert>}
+                {collectionFull && (
+                  <Alert type="warning">
+                    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
+                      <span>Collection is full ({collection.length}/{MAX_COLLECTION} rows). Clear it here, or go to the Collection tab to edit/export.</span>
+                      <Btn variant="danger" onClick={()=>{ setCollection([]); setPushResult(null); setPushError("") }} style={{ padding:"4px 10px", fontSize:11 }} title="Remove all collected rows">🗑 Clear Collection</Btn>
+                    </div>
+                  </Alert>
+                )}
                 {genWarning && <Alert type="warning">{genWarning}</Alert>}
                 {genError && <Alert type="danger">{genError}</Alert>}
               </div>

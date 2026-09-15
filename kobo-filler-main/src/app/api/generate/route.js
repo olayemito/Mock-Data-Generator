@@ -79,7 +79,7 @@ export async function POST(req) {
   try { body = await req.json() }
   catch { return Response.json({ error: "Invalid JSON body." }, { status: 400 }) }
 
-  const { config, previousContext } = body || {}
+  const { config, previousContext, model } = body || {}
   const fields = Array.isArray(body?.fields) ? body.fields : []
 
   // batchSize capped to [10, 50]; default 20
@@ -97,6 +97,7 @@ export async function POST(req) {
     // with or without JSON-mode support) can return a raw JSON array. The robust
     // parseRecords() above also tolerates {"records":[...]} wrappers.
     const completion = await generateCompletion(messages, {
+      model, // client-selected OpenRouter model (falls back to env DEFAULT_AI_MODEL when undefined)
       temperature: 0.4,
       response_format: { type: "text" },
     })
