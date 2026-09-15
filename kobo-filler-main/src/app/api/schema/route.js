@@ -6,35 +6,22 @@ export async function GET(request) {
   try {
     // ── Extract params from request.nextUrl.searchParams ──────────────────
     const searchParams = request.nextUrl.searchParams
-    const assetId = searchParams.get("assetId")
-
-    // Read token from header FIRST, fallback to URL query param or env
-    const koboToken =
-      request.headers.get("x-kobo-token") ||
-      searchParams.get("koboToken") ||
-      process.env.KOBO_API_TOKEN
-
-    // server: query param → header → KOBO_SERVER_URL env → default.
-    let server =
-      searchParams.get("server") ||
-      request.headers.get("x-kobo-server") ||
-      process.env.KOBO_SERVER_URL ||
-      "kf.kobotoolbox.org"
+    const assetId   = searchParams.get("assetId")
+    const koboToken = searchParams.get("koboToken")
+    // server: query param → KOBO_SERVER_URL env → default. (env fallback keeps
+    // the documented KOBO_SERVER_URL var working for self-hosted/EU servers.)
+    let server = searchParams.get("server") || process.env.KOBO_SERVER_URL || "kf.kobotoolbox.org"
 
     // ── Explicit validation ─────────────────────────────────────────────────
-    if (!assetId) {
-      return NextResponse.json({ error: "Asset ID is required." }, { status: 400 })
-    }
-    if (!koboToken) {
+    if (!assetId || !koboToken) {
       return NextResponse.json(
-        { error: "KoboToolbox API token is required." },
+        { error: "Missing required parameters: assetId and koboToken are required." },
         { status: 400 }
       )
     }
 
     // ── Sanitize server: strip leading http(s):// + trailing slash ──────────
     server = server.replace(/^https?:\/\//, "").replace(/\/$/, "")
-    const displayServer = `https://${server}`
 
     // ── Upstream fetch (Authorization: Token — NOT Bearer) ──────────────────
     const targetUrl = `https://${server}/api/v2/assets/${assetId}.json`
@@ -63,20 +50,8 @@ export async function GET(request) {
     // ── Upstream error: log raw text, forward Kobo's status + message ────────
     if (!res.ok) {
       console.error(`[Schema API Error] Kobo returned ${res.status}:`, text)
-      if (res.status === 401) {
-        return NextResponse.json(
-          { error: "Invalid API token. Check your KoboToolbox API key." },
-          { status: 401 }
-        )
-      }
-      if (res.status === 404) {
-        return NextResponse.json(
-          { error: `Form not found on ${displayServer}. Check your Asset ID and server instance.` },
-          { status: 404 }
-        )
-      }
       return NextResponse.json(
-        { error: `Kobo API Error (${res.status}): ${text.slice(0, 200)}` },
+        { error: `Kobo API Error (${res.status}): ${text}` },
         { status: res.status }
       )
     }
@@ -94,7 +69,7 @@ export async function GET(request) {
       )
     }
 
-    const survey = data?.content?.survey
+    const survey      = data?.content?.survey
     const choicesList = data?.content?.choices || []
     if (!survey || survey.length === 0) {
       return NextResponse.json(
@@ -115,8 +90,8 @@ export async function GET(request) {
     const fields = survey
       .filter(f => f.name || f.$autoname)
       .map(f => {
-        const name = f.name || f.$autoname
-        const type = f.type || "text"
+        const name  = f.name || f.$autoname
+        const type  = f.type || "text"
         const label = Array.isArray(f.label) ? f.label[0] : (f.label || name)
         let choices = null
         if (type.startsWith("select_one") || type.startsWith("select_multiple")) {
@@ -134,5 +109,4 @@ export async function GET(request) {
       { status: 500 }
     )
   }
-
 }
