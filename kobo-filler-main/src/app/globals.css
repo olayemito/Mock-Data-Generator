@@ -1,0 +1,117 @@
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=DM+Mono:wght@400;500&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:         #f6f8fa;
+  --bg-subtle:  #eef1f5;
+  --surface:    #ffffff;
+  --surface-2:  #f3f6f9;
+  --border:     #d0d7de;
+  --border-sub: #e8ecf0;
+  --text:       #1f2328;
+  --text-muted: #636c76;
+  --text-dim:   #9ba3ab;
+  --accent:     #0d9488;
+  --accent-2:   #0f766e;
+  --accent-dim: rgba(13,148,136,0.10);
+  --accent-glow:rgba(13,148,136,0.20);
+  --danger:     #cf222e;
+  --danger-dim: rgba(207,34,46,0.10);
+  --success:    #1a7f37;
+  --success-dim:rgba(26,127,55,0.10);
+  --warning:    #9a6700;
+  --warning-dim:rgba(154,103,0,0.10);
+  --shadow-sm:  0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-md:  0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
+  --shadow-lg:  0 8px 24px rgba(0,0,0,0.10), 0 4px 8px rgba(0,0,0,0.04);
+  --radius-sm:  6px;
+  --radius-md:  10px;
+  --radius-lg:  14px;
+  --font-sans:  'DM Sans', system-ui, sans-serif;
+  --font-display:'Syne', sans-serif;
+  --font-mono:  'DM Mono', monospace;
+  --transition: 0.18s cubic-bezier(0.4,0,0.2,1);
+}
+
+[data-theme="dark"] {
+  --bg:         #0d1117;
+  --bg-subtle:  #111820;
+  --surface:    #161b22;
+  --surface-2:  #1e2430;
+  --border:     #30363d;
+  --border-sub: #21262d;
+  --text:       #e6edf3;
+  --text-muted: #7d8590;
+  --text-dim:   #484f58;
+  --accent:     #2dd4bf;
+  --accent-2:   #5eead4;
+  --accent-dim: rgba(45,212,191,0.12);
+  --accent-glow:rgba(45,212,191,0.22);
+  --danger:     #f85149;
+  --danger-dim: rgba(248,81,73,0.12);
+  --success:    #3fb950;
+  --success-dim:rgba(63,185,80,0.12);
+  --warning:    #d29922;
+  --warning-dim:rgba(210,153,34,0.12);
+  --shadow-sm:  0 1px 3px rgba(0,0,0,0.30), 0 1px 2px rgba(0,0,0,0.20);
+  --shadow-md:  0 4px 12px rgba(0,0,0,0.35), 0 2px 4px rgba(0,0,0,0.20);
+  --shadow-lg:  0 8px 24px rgba(0,0,0,0.40), 0 4px 8px rgba(0,0,0,0.20);
+}
+
+html { font-size: 15px; }
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  min-height: 100vh;
+  transition: background var(--transition), color var(--transition);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+/* Selection */
+::selection { background: var(--accent-dim); color: var(--accent); }
+
+/* Focus */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Animations */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.fade-up { animation: fadeUp 0.4s cubic-bezier(0.4,0,0.2,1) both; }
+.fade-in { animation: fadeIn 0.3s ease both; }
+
+.stagger-1 { animation-delay: 0.05s; }
+.stagger-2 { animation-delay: 0.10s; }
+.stagger-3 { animation-delay: 0.15s; }
+.stagger-4 { animation-delay: 0.20s; }
