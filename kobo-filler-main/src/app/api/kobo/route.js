@@ -106,7 +106,7 @@ export async function POST(req) {
           if (abort) break
 
           // Strip KoboFiller internal metadata before building the XML
-          const { _enumerator, _submission_time, _id, _rowId, ...fieldData } = rows[i]
+          const { _enumerator_id, _submission_time, _id, _rowId, ...fieldData } = rows[i] // strip display-only _ metadata; start/end/deviceid/username are standard Kobo meta (kept, emitted as XML)
           const instanceId = `uuid:${generateUUID()}`
           const xml        = buildSubmissionXml(formId, fieldData, instanceId)
 

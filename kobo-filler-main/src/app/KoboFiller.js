@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useCallback } from "react"
 import { exportExcel, exportCSV } from "@/lib/exportExcel"
 import { removeDuplicates } from "@/lib/dedupe"
-import { simulateEnumerator } from "@/lib/simulateEnumerator"
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 function useTheme() {
@@ -269,16 +268,18 @@ function RowEditor({ row, columns, onSave, onCancel }) {
 }
 
 // ─── Collection Table ─────────────────────────────────────────────────────────
-function CollectionTable({ collection, setCollection, columns, isPushing }) {
+function CollectionTable({ collection, setCollection, columns, isPushing, onCollectionMutate }) {
   const [editingIndex, setEditingIndex] = useState(null)
 
   function saveEdit(index, updatedValues) {
     setCollection(prev => prev.map((row, i) => i === index ? { ...row, ...updatedValues } : row))
+    onCollectionMutate?.()
     setEditingIndex(null)
   }
 
   function deleteRow(index) {
     setCollection(prev => prev.filter((_, i) => i !== index))
+    onCollectionMutate?.()
     if (editingIndex === index) {
       setEditingIndex(null)
     } else if (editingIndex !== null && editingIndex > index) {
@@ -395,6 +396,7 @@ export default function KoboFiller() {
   const [activeTab, setActiveTab]     = useState("generate")
 
   const [pushProgress, setPushProgress] = useState(null)
+  const [isPushed, setIsPushed]               = useState(false)
   const [pushResult, setPushResult]     = useState(null)
   const [pushError, setPushError]       = useState("")
 
@@ -421,7 +423,7 @@ export default function KoboFiller() {
   }
 
   async function generate() {
-    setLoading(true); setGenError(""); setLastBatch([]); setGenWarning(""); setAccumulatedRecords([])
+    setLoading(true); setGenError(""); setLastBatch([]); setGenWarning(""); setAccumulatedRecords([]); setIsPushed(false)
 
     const target    = Math.max(1, config.entries || 10)
     const CHUNK     = 20
@@ -465,7 +467,27 @@ export default function KoboFiller() {
       // trim to target, dedupe across chunks, then simulate enumerators/timestamps.
       const trimmed = accumulated.slice(0, target)
       const deduped = removeDuplicates(trimmed)
-      const final   = simulateEnumerator(deduped, enumerators || 3, days || 3, startDate)
+      const final   = deduped.map((row, idx) => {
+        // Inject staggered enumerator + submission metadata.
+        // start/end are standard Kobo meta (kept by the push route); _enumerator_id
+        // and _submission_time are display-only (underscore-stripped before XML).
+        const totalRequested    = Math.max(1, target)
+        const totalDays         = Math.max(1, days || 1)
+        const totalEnumerators = Math.max(1, enumerators || 1)
+        const startTimestamp    = startDate ? new Date(startDate).getTime() : Date.now()
+        const globalIdx         = idx   // processing the FULL accumulated set
+        const randomDayOffset   = Math.floor((globalIdx / totalRequested) * totalDays)
+        const randomHourOffset  = Math.floor(Math.random() * 8) + 8   // 8 AM – 4 PM window
+        const subDate           = new Date(startTimestamp + randomDayOffset * 86400000 + randomHourOffset * 3600000)
+        const enumId            = `enum_${(globalIdx % totalEnumerators) + 1}`
+        return {
+          ...row,
+          _enumerator_id:    enumId,
+          _submission_time:  subDate.toISOString().replace("T", " ").substring(0, 19),
+          start:             new Date(subDate.getTime() - 15 * 60000).toISOString(),
+          end:               subDate.toISOString(),
+        }
+      })
 
       setAccumulatedRecords(final)
       setLastBatch(final)
@@ -485,6 +507,7 @@ export default function KoboFiller() {
     setCollection(prev => [...prev, ...toAdd])
     setLastBatch([])
     setGenWarning("")
+    setIsPushed(false)
     setActiveTab("collection")
   }
 
@@ -521,6 +544,7 @@ export default function KoboFiller() {
             } else if (msg.type==="done") {
               setPushProgress(null)
               setPushResult({ pushed:msg.pushed, failed:msg.failed, errors:msg.errors })
+              if (msg.failed === 0 && msg.pushed > 0) setIsPushed(true)
             }
           } catch {}
         }
@@ -669,7 +693,7 @@ export default function KoboFiller() {
                     </Btn>
                   )}
                   {lastBatch.length>0 && (
-                    <Btn variant="ghost" disabled={loading||isPushing} onClick={()=>{ setLastBatch([]); setGenWarning("") }}>
+                    <Btn variant="ghost" disabled={loading||isPushing} onClick={()=>{ setLastBatch([]); setGenWarning(""); setIsPushed(false) }}>
                       Discard
                     </Btn>
                   )}
@@ -678,7 +702,7 @@ export default function KoboFiller() {
                   <Alert type="warning">
                     <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
                       <span>Collection is full ({collection.length}/{MAX_COLLECTION} rows). Clear it here, or go to the Collection tab to edit/export.</span>
-                      <Btn variant="danger" onClick={()=>{ setCollection([]); setPushResult(null); setPushError("") }} style={{ padding:"4px 10px", fontSize:11 }} title="Remove all collected rows">🗑 Clear Collection</Btn>
+                      <Btn variant="danger" onClick={()=>{ setCollection([]); setPushResult(null); setPushError(""); setIsPushed(false) }} style={{ padding:"4px 10px", fontSize:11 }} title="Remove all collected rows">🗑 Clear Collection</Btn>
                     </div>
                   </Alert>
                 )}
@@ -718,7 +742,7 @@ export default function KoboFiller() {
                   <Btn variant="success" disabled={collectionFull} onClick={addToCollection}>
                     ➕ Add to Collection ({collection.length}/{MAX_COLLECTION})
                   </Btn>
-                  <Btn variant="ghost" onClick={()=>{ setLastBatch([]); setGenWarning("") }}>Discard</Btn>
+                  <Btn variant="ghost" onClick={()=>{ setLastBatch([]); setGenWarning(""); setIsPushed(false) }}>Discard</Btn>
                 </div>
               </Card>
             )}
@@ -740,11 +764,11 @@ export default function KoboFiller() {
                       <Btn variant="secondary" disabled={isPushing||loading} onClick={()=>exportExcel(collection)}>📥 Excel</Btn>
                       <Btn variant="secondary" disabled={isPushing||loading} onClick={()=>exportCSV(collection)}>📄 CSV</Btn>
                       {assetId && (
-                        <Btn variant="success" loading={isPushing} disabled={loading} onClick={pushToKobo} style={{ minWidth:170 }}>
-                          {isPushing ? "Pushing…" : "🚀 Push to KoboToolbox"}
+                        <Btn variant="success" loading={isPushing} disabled={isPushing||isPushed||collection.length===0} onClick={pushToKobo} style={{ minWidth:170 }}>
+                          {isPushing ? "Pushing…" : isPushed ? "✓ Pushed to Kobo" : "🚀 Push to KoboToolbox"}
                         </Btn>
                       )}
-                      <Btn variant="danger" disabled={isPushing||loading} onClick={()=>{ setCollection([]); setPushResult(null); setPushError("") }}>
+                      <Btn variant="danger" disabled={isPushing||loading} onClick={()=>{ setCollection([]); setPushResult(null); setPushError(""); setIsPushed(false) }}>
                         🗑 Clear All
                       </Btn>
                     </div>
@@ -787,6 +811,7 @@ export default function KoboFiller() {
                   setCollection={setCollection}
                   columns={collectionCols}
                   isPushing={isPushing}
+                  onCollectionMutate={() => setIsPushed(false)}
                 />
                 <div style={{ padding:"8px 14px", borderTop:"1px solid var(--border-sub)", background:"var(--surface-2)", fontSize:10, color:"var(--text-dim)", display:"flex", gap:12, flexWrap:"wrap" }}>
                   <span>Columns prefixed <code style={{ fontFamily:"var(--font-mono)", background:"var(--bg)", padding:"1px 4px", borderRadius:3 }}>_</code> are KoboFiller metadata — not editable.</span>
