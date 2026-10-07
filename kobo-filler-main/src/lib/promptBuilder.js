@@ -1,4 +1,4 @@
-export function buildPrompt(config, fields, batchSize, previous_distribution_summary) {
+export function buildPrompt(config, fields, batchSize, previous_distribution_summary, formId) {
   const count = batchSize || config.entries || 10
 
   const cleanFields = fields && fields.length > 0
@@ -27,7 +27,18 @@ export function buildPrompt(config, fields, batchSize, previous_distribution_sum
     fieldCount = 4
   }
 
-  // ── Build previous distribution summary block (state continuity) ──────────
+  // ── Generation mode: 'uniform' → UNIFORM, otherwise REALISTIC ──────────────
+  // activeMode = UNIFORM when uniform selected OR baseline N < 10 (cold-start fallback);
+  // otherwise REALISTIC. {GENERATION_MODE} interpolates activeMode so the prompt header
+  // matches the distribution fallback (no cold-start contradiction / hallucinated distros).
+  // totalRows is preferred; totalRecords is the actual key emitted by computeDistribution.
+  const totalBaselineRows =
+    previous_distribution_summary?.totalRows ??
+    previous_distribution_summary?.totalRecords ?? 0
+  const activeMode =
+    (config.distribution === "uniform" || totalBaselineRows < 10) ? "UNIFORM" : "REALISTIC"
+
+  // ── Empirical distribution matrix (REALISTIC only, and only once N >= 10) ───
   let contextBlock = ""
   if (previous_distribution_summary && previous_distribution_summary.fields) {
     const lines = []
@@ -45,31 +56,89 @@ export function buildPrompt(config, fields, batchSize, previous_distribution_sum
         lines.join("\n")
     }
   }
+  const distributions =
+    (activeMode === "REALISTIC" && contextBlock)
+      ? contextBlock
+      : "None (Uniform selection across allowed choice keys)"
+
+  const formIdStr = formId || "(not provided)"
 
   const system =
-    `You are a synthetic survey-response generator producing realistic, internally consistent data for a field survey in ${config.country || "Nigeria"}.\n\n` +
-    `OUTPUT CONTRACT:\n` +
-    `- Return ONLY a raw JSON array of objects (first character '[', last character ']').\n` +
-    `- No prose, no markdown, no code fences.\n` +
-    `- Every object MUST include ALL ${fieldCount} fields with non-empty values.\n\n` +
-    (contextBlock
-      ? `STATE CONTINUITY — CRITICAL:\n${contextBlock}\n\n` +
-        `You MUST preserve these categorical proportions in the new rows you generate (keep the same relative frequencies for each category, allowing only minor natural variance).\n` +
-        `You MUST maintain skip-logic consistency: conditional/dependent fields must follow the same dependency patterns established above (e.g., if a "pregnant" field is only "yes" when gender is "female", keep that rule). Do not contradict the previously established value distributions.`
-      : `This is the first batch — distribute values realistically across all allowed options and establish consistent skip-logic patterns.`)
+`You are an enterprise-grade synthetic data generation engine specifically designed for KoboToolbox and OpenRosa field data platforms.
+
+YOUR MISSION:
+Analyze the provided XLSForm asset schema, field specifications, and empirical distribution metrics to generate highly realistic, schema-valid, ready-to-submit survey records.
+
+================================================================================
+1. CRITICAL FIELD KEY RULE (NON-NEGOTIABLE)
+================================================================================
+Every key in your generated JSON objects MUST match the exact internal XLSForm XML field name (the 'name' attribute in the schema).
+- NEVER use human-readable question labels, display text, or column titles.
+- Example: Use "caregiver_edu", NOT "1. Caregiver's highest educational level".
+
+================================================================================
+2. FIELD TYPE & VALUE FORMATTING CONSTRAINTS
+================================================================================
+- select_one: Return exactly one choice key string from the allowed choices array (e.g., "Secondary").
+- select_multiple (CRITICAL): Return selected choice keys as a SINGLE SPACE-DELIMITED STRING.
+  * CORRECT: "coil indoor_spray repellent"
+  * INCORRECT: ["coil", "indoor_spray"], "coil, indoor_spray"
+- integer / decimal: Return numeric string or number within observed min/max limits.
+- text / string: Generate contextually realistic brief text.
+- PII / Sensitive Fields: If a field is flagged as PII (names, phone numbers, GPS, addresses), generate fictitious, realistic placeholder text. Never output real personal data.
+
+================================================================================
+3. CONDITIONAL SKIP LOGIC & DEPENDENCIES
+================================================================================
+Implicitly respect survey skip logic:
+- If a trigger question is negative (e.g., "fever_14d": "No"), leave dependent follow-up fields (e.g., "fever_treatment") as NULL or OMIT them entirely from that record.
+- Do NOT generate answers for questions that would be skipped in a real survey workflow.
+
+================================================================================
+4. GENERATION MODES
+================================================================================
+Target Mode: "${activeMode}" (REALISTIC or UNIFORM)
+
+- REALISTIC MODE:
+  Strictly weigh the value frequencies for each field according to the provided empirical percentage distribution matrix.
+
+- UNIFORM MODE:
+  Ignore existing baseline frequencies and select uniformly with equal probability across all allowed choice keys defined in the schema.
+
+================================================================================
+5. RUNTIME INPUT DATA
+================================================================================
+- Target Form ID: "${formIdStr}"
+- Total Rows to Generate: ${count}
+- Schema Fields & Allowed Choices:
+${fieldList}
+
+- Empirical Distribution Matrix (Used only if REALISTIC mode):
+${distributions}
+
+================================================================================
+6. OUTPUT FORMAT CONSTRAINTS
+================================================================================
+1. Output MUST be a valid JSON Array containing exactly ${count} submission objects.
+2. Do NOT wrap your output in markdown code blocks (e.g. do NOT use \`\`\`json or \`\`\`). Return ONLY raw JSON text.
+3. Ensure the JSON is completely closed and valid.
+
+[EXAMPLE EXPECTED OUTPUT STRUCTURE]
+[
+  {
+    "caregiver_edu": "Secondary",
+    "household_size": "5",
+    "fever_14d": "Yes",
+    "malaria_diag": "RDT",
+    "mosquito_methods": "coil indoor_spray",
+    "smc_received": "Yes",
+    "smc_cycles": "3"
+  }
+]`
 
   const user =
-    `Generate exactly ${count} synthetic survey responses for a field survey in ${config.country || "Nigeria"}.\n\n` +
-    `FIELDS (${fieldCount} total):\n${fieldList}\n\n` +
-    `STRICT RULES:\n` +
-    `- Fields marked "ALLOWED VALUES ONLY": use ONLY those exact values, nothing else\n` +
-    `- text fields: realistic, culturally appropriate values for ${config.country || "Nigeria"}\n` +
-    `- integer/decimal fields: realistic numeric values\n` +
-    `- Distribution: ${config.distribution || "realistic"} — vary values naturally across all options\n` +
-    `- Every row MUST include ALL ${fieldCount} fields — no missing fields\n` +
-    `- Output ONLY a raw JSON array. No explanation, no markdown, no code fences\n` +
-    `- First character must be [ and last character must be ]\n\n` +
-    `Example format: [{"field1":"value1","field2":"value2"},{"field1":"value3","field2":"value4"}]`
+`Generate exactly ${count} ${activeMode}-mode records for form "${formIdStr}" following ALL rules above. ` +
+`Return ONLY the raw JSON array — no markdown fences, no prose, no explanation.`
 
   return [
     { role: "system", content: system },

@@ -1,5 +1,9 @@
 export const maxDuration = 60
 
+// Max in-flight OpenRosa submissions per chunk (parallel batch processing prevents
+// Vercel 10s/60s function timeouts on large datasets).
+const CONCURRENCY_LIMIT = 5
+
 // ── UUID generator (for the OpenRosa <instanceID>uuid:…</instanceID>) ─────────
 function generateUUID() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -31,26 +35,56 @@ function escapeXml(s) {
 }
 
 // ── Build an OpenRosa submission XML string for one row ──────────────────────
-//   <data id="FORM_ID">
+//   <${formId} id="${formId}">
 //     <field_name_1>value1</field_name_1>
-//     <field_name_2>value2</field_name_2>
+//     <select_multiple_field>key1 key2</select_multiple_field>
 //     <meta>
 //       <instanceID>uuid:GENERATED_UUID</instanceID>
+//       <_submission_time>YYYY-MM-DD HH:MM:SS</_submission_time>
+//       <_enumerator_id>enum_N</_enumerator_id>
 //     </meta>
-//   </data>
-function buildSubmissionXml(formId, fieldData, instanceId) {
-  const fields = Object.keys(fieldData)
+//   </${formId}>
+// Convert a field value to OpenRosa XML text (schema-aware):
+//  - arrays → space-joined ("key1 key2")
+//  - select_multiple strings containing commas → split/trim/space-join (cleans LLM
+//    formatting drift like "coil, indoor_spray" → "coil indoor_spray")
+//  - all other types (text/integer/select_one/…) → String(v) UNTOUCHED (preserves
+//    free-text fields like addresses/descriptions that legitimately contain commas)
+function convertValue(v, fieldType) {
+  if (v == null) return ""
+  if (Array.isArray(v)) return v.join(" ")
+  if (fieldType === "select_multiple" && typeof v === "string" && v.includes(",")) {
+    return v.split(",").map(s => s.trim()).join(" ")
+  }
+  return String(v)
+}
+
+// Serialize one row → OpenRosa XML. Root tag = formId (with id="${formId}");
+// body = non-underscore fields (select_multiple values space-delimited via the
+// schema-aware convertValue); <meta> = generated instanceID + _submission_time
+// + _enumerator_id (from row, with index-based fallbacks if the client didn't attach them).
+function serializeToOpenRosaXml(row, formId, index, fieldTypes) {
+  const root = formId || "data"
+
+  const body = Object.keys(row)
     .filter(k => k && !k.startsWith("_"))
-    .map(k => `  <${k}>${escapeXml(fieldData[k])}</${k}>`)
+    .map(k => `  <${k}>${escapeXml(convertValue(row[k], fieldTypes ? fieldTypes[k] : undefined))}</${k}>`)
     .join("\n")
+
+  const instanceId     = `uuid:${generateUUID()}`
+  const submissionTime = row._submission_time || new Date().toISOString().replace("T", " ").substring(0, 19)
+  const enumeratorId   = row._enumerator_id || `enum_${index + 1}`
+
   return (
     `<?xml version="1.0"?>\n` +
-    `<data id="${escapeXml(formId)}">\n` +
-    `${fields}\n` +
+    `<${root} id="${escapeXml(root)}">\n` +
+    `${body}\n` +
     `  <meta>\n` +
     `    <instanceID>${escapeXml(instanceId)}</instanceID>\n` +
+    `    <_submission_time>${escapeXml(submissionTime)}</_submission_time>\n` +
+    `    <_enumerator_id>${escapeXml(enumeratorId)}</_enumerator_id>\n` +
     `  </meta>\n` +
-    `</data>`
+    `</${root}>`
   )
 }
 
@@ -68,13 +102,13 @@ export async function POST(req) {
 
   // ── Resolve servers: kf URL (asset lookup) + kc /submission URL (OpenRosa) ──
   const server        = bodyServer || process.env.KOBO_SERVER_URL || "https://kf.kobotoolbox.org"
-  const kfUrl          = server.replace(/\/$/, "")
+  const kfUrl         = server.replace(/\/$/, "")
   const submissionUrl = getSubmissionUrl(server)
 
-  // ── Look up the form's id_string — the <data id="…"> must match the FORM's
-  //    id_string, not the asset uid the user typed. Non-fatal: fall back to the
-  //    user-supplied assetId if this lookup fails.
+  // ── Look up the form's id_string + build a field-name→type lookup. Non-fatal:
+  //    fall back to the user-supplied assetId + an empty fieldTypes if this fails.
   let formId = assetId
+  let fieldTypes = {}   // field name → normalized type (e.g. "select_multiple") for schema-aware convertValue
   try {
     const assetRes = await fetch(`${kfUrl}/api/v2/assets/${assetId}/`, {
       headers: { Authorization: `Token ${koboToken}`, Accept: "application/json" },
@@ -83,9 +117,17 @@ export async function POST(req) {
     if (assetRes.ok) {
       const assetData = await assetRes.json()
       formId = assetData.id_string || assetData.uid || assetId
+      // Build field-name → type lookup from the XLSForm survey definition, so
+      // convertValue can clean select_multiple comma-strings without touching free-text.
+      // Kobo types come as "select_multiple <list_name>" → normalize to the first token.
+      const survey = assetData?.content?.survey || []
+      for (const f of survey) {
+        const name = f && (f.name || f.$autoname)
+        if (name) fieldTypes[name] = String(f.type || "text").split(" ")[0]
+      }
     }
   } catch {
-    // non-fatal — proceed with the user-supplied assetId as the form id
+    // non-fatal — proceed with the user-supplied assetId as the form id (fieldTypes stays {})
   }
 
   const encoder = new TextEncoder()
@@ -99,63 +141,84 @@ export async function POST(req) {
       let failed = 0
       const errors = []
       const total  = rows.length
-      let abort   = false   // set on HTTP 410 (endpoint deprecated → all will fail)
+      let abort   = false   // set on HTTP 410 (endpoint deprecated → stop future chunks)
 
       try {
-        for (let i = 0; i < rows.length; i++) {
+        // ── Parallel batch chunking: process rows in chunks of CONCURRENCY_LIMIT
+        //    via Promise.all (5 in flight at a time) to stay within Vercel function
+        //    timeouts on large datasets. `send` is called only at chunk-level (after
+        //    each Promise.all resolves) to avoid concurrent-enqueue races.
+        for (let chunkStart = 0; chunkStart < rows.length; chunkStart += CONCURRENCY_LIMIT) {
           if (abort) break
 
-          // Strip KoboFiller internal metadata before building the XML
-          const { _enumerator_id, _submission_time, _id, _rowId, ...fieldData } = rows[i] // strip display-only _ metadata; start/end/deviceid/username are standard Kobo meta (kept, emitted as XML)
-          const instanceId = `uuid:${generateUUID()}`
-          const xml        = buildSubmissionXml(formId, fieldData, instanceId)
+          const chunk = rows.slice(chunkStart, chunkStart + CONCURRENCY_LIMIT)
+          const results = await Promise.all(chunk.map(async (row, inChunkIdx) => {
+            const globalIdx = chunkStart + inChunkIdx
+            const xml = serializeToOpenRosaXml(row, formId, globalIdx, fieldTypes)
 
-          try {
-            // OpenRosa submission: multipart/form-data with the XML blob under
-            // the standard key "xml_submission_file". fetch/undici sets the
-            // multipart Content-Type + boundary automatically — do NOT set it
-            // manually (a hardcoded boundary would break parsing).
-            const formData = new FormData()
-            formData.append(
-              "xml_submission_file",
-              new Blob([xml], { type: "text/xml" }),
-              "submission.xml"
-            )
-
-            const res = await fetch(submissionUrl, {
-              method: "POST",
-              headers: { Authorization: `Token ${koboToken}` },
-              body: formData,
-            })
-
-            // Safely read the body as text. Kobo returns HTML (not JSON) on
-            // errors — never JSON.parse it.
-            const text = await res.text()
-
-            if (res.status === 410) {
-              failed++
-              errors.push(
-                `Row ${i + 1}: Submission endpoint deprecated (410). Ensure you are posting OpenRosa XML to the kc server host.`
+            try {
+              // OpenRosa submission: multipart/form-data with the XML blob under
+              // the standard key "xml_submission_file". fetch/undici sets the
+              // multipart Content-Type + boundary automatically — do NOT set it
+              // manually (a hardcoded boundary would break parsing).
+              const formData = new FormData()
+              formData.append(
+                "xml_submission_file",
+                new Blob([xml], { type: "text/xml" }),
+                "submission.xml"
               )
-              abort = true   // endpoint deprecated — every subsequent row will also 410
-            } else if (!res.ok) {
-              // 201 Created / 200 OK = success; anything else is a failure.
-              const clean = text
-                .replace(/<[^>]+>/g, " ")
-                .replace(/\s+/g, " ")
-                .trim()
-                .slice(0, 160)
-              failed++
-              errors.push(`Row ${i + 1} failed (${res.status}): ${clean || "no error body"}`)
-            } else {
-              pushed++
+
+              const res = await fetch(submissionUrl, {
+                method: "POST",
+                headers: { Authorization: `Token ${koboToken}` },
+                body: formData,
+              })
+
+              // Safely read the body as text. Kobo returns HTML (not JSON) on
+              // errors — never JSON.parse it.
+              const text = await res.text()
+
+              if (res.status === 410) {
+                return { ok: false, status: 410, text, abort: true }
+              }
+              if (!res.ok) {
+                return { ok: false, status: res.status, text }
+              }
+              return { ok: true }
+            } catch (e) {
+              return { ok: false, error: e.message }
             }
-          } catch (e) {
-            failed++
-            errors.push(`Row ${i + 1} network error: ${e.message}`)
+          }))
+
+          // Aggregate this chunk's results into the overall counters (sequential,
+          // so `send` is race-free). 410 aborts future chunks.
+          for (let j = 0; j < results.length; j++) {
+            const r = results[j]
+            const globalIdx = chunkStart + j
+            if (r.ok) {
+              pushed++
+            } else {
+              failed++
+              if (r.abort) {
+                errors.push(
+                  `Row ${globalIdx + 1}: Submission endpoint deprecated (410). Ensure you are posting OpenRosa XML to the kc server host.`
+                )
+                abort = true   // endpoint deprecated — every subsequent row will also 410
+              } else if (r.error) {
+                errors.push(`Row ${globalIdx + 1} network error: ${r.error}`)
+              } else {
+                // 201 Created / 200 OK = success; anything else is a failure.
+                const clean = (r.text || "")
+                  .replace(/<[^>]+>/g, " ")
+                  .replace(/\s+/g, " ")
+                  .trim()
+                  .slice(0, 160)
+                errors.push(`Row ${globalIdx + 1} failed (${r.status}): ${clean || "no error body"}`)
+              }
+            }
           }
 
-          send({ type: "progress", current: i + 1, total, pushed, failed })
+          send({ type: "progress", current: Math.min(chunkStart + chunk.length, total), total, pushed, failed })
         }
       } catch (outerErr) {
         errors.push(`Unexpected error: ${outerErr.message}`)
