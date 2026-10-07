@@ -59,12 +59,25 @@ function convertValue(v, fieldType) {
   return String(v)
 }
 
+// Count non-metadata (survey) fields in a row: keys not starting with "_" and not
+// standard Kobo meta (start/end). Used to reject empty-row payloads before push.
+function countSurveyFields(row) {
+  if (!row || typeof row !== "object") return 0
+  return Object.keys(row).filter(k => k && !k.startsWith("_") && k !== "start" && k !== "end").length
+}
+
 // Serialize one row → OpenRosa XML. Root tag = formId (with id="${formId}");
 // body = non-underscore fields (select_multiple values space-delimited via the
 // schema-aware convertValue); <meta> = generated instanceID + _submission_time
 // + _enumerator_id (from row, with index-based fallbacks if the client didn't attach them).
+// Logs the outgoing XML + throws if the row has 0 survey fields (defensive backstop;
+// the POST handler pre-validates this → HTTP 400).
 function serializeToOpenRosaXml(row, formId, index, fieldTypes) {
   const root = formId || "data"
+
+  // Defensive: refuse to serialize a row with 0 survey fields. The POST handler
+  // pre-validates this → HTTP 400, but this guards against any bypass.
+  if (countSurveyFields(row) === 0) throw new Error("Cannot push empty row payload to Kobo")
 
   const body = Object.keys(row)
     .filter(k => k && !k.startsWith("_"))
@@ -75,7 +88,7 @@ function serializeToOpenRosaXml(row, formId, index, fieldTypes) {
   const submissionTime = row._submission_time || new Date().toISOString().replace("T", " ").substring(0, 19)
   const enumeratorId   = row._enumerator_id || `enum_${index + 1}`
 
-  return (
+  const xml =
     `<?xml version="1.0"?>\n` +
     `<${root} id="${escapeXml(root)}">\n` +
     `${body}\n` +
@@ -85,7 +98,9 @@ function serializeToOpenRosaXml(row, formId, index, fieldTypes) {
     `    <_enumerator_id>${escapeXml(enumeratorId)}</_enumerator_id>\n` +
     `  </meta>\n` +
     `</${root}>`
-  )
+
+  console.log("OUTGOING XML SAMPLE:", xml)
+  return xml
 }
 
 export async function POST(req) {
@@ -128,6 +143,17 @@ export async function POST(req) {
     }
   } catch {
     // non-fatal — proceed with the user-supplied assetId as the form id (fieldTypes stays {})
+  }
+
+  // ── Pre-stream validation: reject empty-row payloads with a real HTTP 400
+  //    (can't return a 400 from inside the SSE stream). serializeToOpenRosaXml
+  //    also asserts this defensively (throws) as a backstop.
+  const emptyRowIdx = rows.findIndex(r => countSurveyFields(r) === 0)
+  if (emptyRowIdx !== -1) {
+    return Response.json(
+      { error: `Cannot push empty row payload to Kobo (row ${emptyRowIdx + 1} has 0 survey fields).` },
+      { status: 400 }
+    )
   }
 
   const encoder = new TextEncoder()

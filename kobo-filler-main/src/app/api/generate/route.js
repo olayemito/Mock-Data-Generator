@@ -103,14 +103,29 @@ export async function POST(req) {
     })
 
     const aiText = completion?.choices?.[0]?.message?.content || ""
+    // parseRecords already strips markdown fences (```json / ```) before parsing.
     const records = parseRecords(aiText)
 
-    if (!records || records.length === 0) {
+    // ── Validate LLM output: non-empty array; each row must have ≥1 survey
+    //    (non-metadata) field — refuse to return empty/invalid records. ────────
+    if (!Array.isArray(records) || records.length === 0) {
       return Response.json(
-        { error: "AI did not return any valid records. Try again." },
-        { status: 502 }
+        { error: "AI returned no valid records (empty or unparsable response)." },
+        { status: 400 }
       )
     }
+    const invalidRowIdx = records.findIndex(
+      r => !r || typeof r !== "object"
+        || Object.keys(r).filter(k => k && !k.startsWith("_") && k !== "start" && k !== "end").length === 0
+    )
+    if (invalidRowIdx !== -1) {
+      return Response.json(
+        { error: `AI returned an invalid row (row ${invalidRowIdx + 1} has no survey fields, only metadata). Refusing to return empty records.` },
+        { status: 400 }
+      )
+    }
+
+    console.log("GENERATED ROW SAMPLE:", JSON.stringify(records[0]))
 
     // ── Updated categorical distribution metadata for the next chunk ─────────
     const updatedContext = computeDistribution(records, fields)
